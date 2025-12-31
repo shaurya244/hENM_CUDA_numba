@@ -1,0 +1,7 @@
+INPUT USED IN HENM ANALYSIS
+
+COARSE_GRAINED_MAPPED_TRAJECTORY.xtc         (COPY FROM "MAPPING_AND_NETWORKING" DIRECTORY)
+REFERENCE.pdb                                (COPY FROM "MAPPING_AND_NETWORKING" DIRECTORY)                               
+mass_of_CG_sites_info.txt                    (COPY FROM "MAPPING_AND_NETWORKING" DIRECTORY)                    
+parameter.txt                                   
+bondlist.csv                                 (COPY FROM "CREATE_BOND_LIST" DIRECTORY)

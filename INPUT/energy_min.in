@@ -1,0 +1,22 @@
+units real
+dimension 3
+boundary p p p
+atom_style full
+
+pair_style none
+bond_style harmonic
+dump 1 all custom 100 "./POST_PROCESSING/em.lammpstrj" id type xu yu zu
+#dump                mydmp all atom 10 dump.lammpstrj 
+read_data "./POST_PROCESSING/LAMMPS_DATA_FILE.data"
+thermo_style        custom step temp epair etotal press vol
+thermo		10
+min_style sd
+minimize	1.0e-4 1.0e-6 1000 10000
+
+
+
+
+
+
+
+

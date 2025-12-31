@@ -1,0 +1,14 @@
+REMARK   1 CREATED WITH MDTraj 1.9.7, 2025-02-20
+CRYST1    0.000    0.000    0.000    nan    nan    nan P 1           1 
+MODEL        0
+ATOM      1  N   ASP A1748      31.273  35.244  35.477  1.00  0.00      PROA N  
+ATOM      2  H   ASP A1748      21.938  44.062  40.067  1.00  0.00      PROA H  
+ATOM      3  H2  ASP A1748      22.732  43.000  30.282  1.00  0.00      PROA H  
+ATOM      4  H3  ASP A1748      22.529  30.412  36.657  1.00  0.00      PROA H  
+ATOM      5  CA  ASP A1748      43.334  37.093  26.799  1.00  0.00      PROA C  
+ATOM      6  HA  ASP A1748      50.791  26.457  35.480  1.00  0.00      PROA H  
+ATOM      7  CB  ASP A1748      41.693  30.474  38.500  1.00  0.00      PROA C  
+ATOM      8  HB3 ASP A1748      48.780  34.254  43.280  1.00  0.00      PROA H  
+TER       9      ASP A1748
+ENDMDL
+END
