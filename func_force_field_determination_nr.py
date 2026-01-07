@@ -444,69 +444,14 @@ def force_constants_nma(N,T,ALPHA,beta,max_itr,bond_list,fluctuation_MD,run,tole
 #             hessian[3*j+l, 3*i+k] = val
 
 import numpy as np
-from numba import cuda
 import math
-
-def NMA_GPU(N, bond_list, fluctuation_MD, T, traj4, mass_weights):
-    M = 3 * N
-    # Ensure data types are strictly correct for the GPU
-    coords = np.ascontiguousarray(traj4.xyz[0], dtype=np.float64)
-    mass = np.ascontiguousarray(mass_weights, dtype=np.float64)
-    
-    # Crucial: Ensure indices are 0-based and within [0, N-1]
-    bond_i = (bond_list[:, 0] - 1).astype(np.int32)
-    bond_j = (bond_list[:, 1] - 1).astype(np.int32)
-    k_spring = bond_list[:, 2].astype(np.float64)
-    r0 = bond_list[:, 3].astype(np.float64)
-
-    # Initialize Hessian on device to avoid unnecessary transfers
-    hessian_dev = cuda.to_device(np.zeros((M, M), dtype=np.float64))
-    
-    # Transfers
-    coords_dev = cuda.to_device(coords)
-    mass_dev = cuda.to_device(mass)
-    bond_i_dev = cuda.to_device(bond_i)
-    bond_j_dev = cuda.to_device(bond_j)
-    k_spring_dev = cuda.to_device(k_spring)
-    r0_dev = cuda.to_device(r0)
-
-    # 1. Compute Hessian
-    threads = 128
-    blocks = (bond_i.shape[0] + threads - 1) // threads
-    hessian_combined_kernel[blocks, threads](
-        bond_i_dev, bond_j_dev, k_spring_dev, r0_dev,
-        coords_dev, mass_dev, hessian_dev
-    )
-
-    # 2. Eigen-decomposition on CPU
-    hessian_cpu = hessian_dev.copy_to_host()
-    w, v = np.linalg.eigh(hessian_cpu)
-
-    # 3. Filter modes (Keep only vibrations)
-    mask = w > 1e-5
-    w_filtered = w[mask]
-    v_filtered = v[:, mask]
-    
-    w_dev = cuda.to_device(w_filtered)
-    v_dev = cuda.to_device(v_filtered)
-
-    # 4. Compute Fluctuations
-    fluct_dev = cuda.device_array(bond_i.shape[0], dtype=np.float64)
-    fluctuation_kernel_optimized[blocks, threads](
-        bond_i_dev, bond_j_dev, coords_dev, mass_dev,
-        v_dev, w_dev, r0_dev, T, fluct_dev
-    )
-
-    fluct_cpu = fluct_dev.copy_to_host()
-    error = fluct_cpu - np.asarray(fluctuation_MD)
-
-    return v_filtered, w_filtered, error
+from numba import cuda
+import gc
 @cuda.jit
-def hessian_combined_kernel(bond_i, bond_j, k_spring, r0, coords, mass, hessian):
-    """
-    Computes off-diagonal and diagonal components in one pass.
-    Uses atomics to ensure thread safety.
-    """
+def build_hessian_atomic(
+    bond_i, bond_j, bond_k, bond_r0,
+    coords, mass, hessian
+):
     bid = cuda.grid(1)
     if bid >= bond_i.shape[0]:
         return
@@ -514,49 +459,133 @@ def hessian_combined_kernel(bond_i, bond_j, k_spring, r0, coords, mass, hessian)
     i = bond_i[bid]
     j = bond_j[bid]
 
-    # Pre-calculate mass scaling
-    inv_mass_prod = 1.0 / math.sqrt(mass[i] * mass[j])
-    # The negative sign and constants
-    coeff = -k_spring[bid] / (r0[bid]**2) * inv_mass_prod
+    ki = bond_k[bid]
+    r0 = bond_r0[bid]
+
+    mi = math.sqrt(mass[i])
+    mj = math.sqrt(mass[j])
+
+    pref = -ki / (r0 * r0 * mi * mj)
 
     for k in range(3):
         dxk = coords[i, k] - coords[j, k]
         for l in range(3):
             dxl = coords[i, l] - coords[j, l]
-            val = coeff * dxk * dxl
 
-            # 1. Off-diagonal elements (i, j)
-            cuda.atomic.add(hessian, (3*i + k, 3*j + l), val)
-            cuda.atomic.add(hessian, (3*j + l, 3*i + k), val)
+            val = pref * dxk * dxl
 
-            # 2. Diagonal accumulation: H_ii = sum(-H_ij)
-            # We subtract val here because val is already negative
-            cuda.atomic.add(hessian, (3*i + k, 3*i + l), -val)
-            cuda.atomic.add(hessian, (3*j + k, 3*j + l), -val)
+            ri = 3*i + k
+            rj = 3*j + k
+            ci = 3*i + l
+            cj = 3*j + l
 
+            # off-diagonal
+            hessian[ri, cj] = val
+            hessian[3*j + l, 3*i + k] = val
+
+            # diagonal accumulation
+            cuda.atomic.add(hessian, (ri, ci), -val)
+            cuda.atomic.add(hessian, (rj, cj), -val)
 @cuda.jit
-def fluctuation_kernel_optimized(bond_i, bond_j, coords, mass, v, w, r0, T, out):
+def compute_fluctuation(
+    bond_i, bond_j, bond_r0,
+    coords, mass, w, v,
+    T, fluct
+):
     bid = cuda.grid(1)
     if bid >= bond_i.shape[0]:
         return
 
     i = bond_i[bid]
     j = bond_j[bid]
-    num_modes = w.shape[0]
+    r0 = bond_r0[bid]
 
-    delta = 0.0
-    for k in range(num_modes):
-        # 1/w_k * (projection)^2
-        # s = (Ri - Rj) dot (vi/sqrt(mi) - vj/sqrt(mj))
-        s = 0.0
-        for d in range(3):
-            diff_vec = (coords[i, d] - coords[j, d])
-            mode_diff = (v[3*i + d, k] / math.sqrt(mass[i]) - 
-                         v[3*j + d, k] / math.sqrt(mass[j]))
-            s += diff_vec * mode_diff
-        
-        delta += (s * s) / w[k]
+    kBT = 8.314462618e-3 * T
+    acc = 0.0
 
-    kB = 8.314462618e-3
-    # Resulting fluctuation
-    out[bid] = (kB * T * delta) / (r0[bid]**2)
+    for m in range(w.shape[0]):
+        invw = 1.0 / math.sqrt(w[m])
+
+        dx = coords[i,0] - coords[j,0]
+        dy = coords[i,1] - coords[j,1]
+        dz = coords[i,2] - coords[j,2]
+
+        term = (
+            dx * (v[3*i,   m]/math.sqrt(mass[i]) - v[3*j,   m]/math.sqrt(mass[j])) +
+            dy * (v[3*i+1, m]/math.sqrt(mass[i]) - v[3*j+1, m]/math.sqrt(mass[j])) +
+            dz * (v[3*i+2, m]/math.sqrt(mass[i]) - v[3*j+2, m]/math.sqrt(mass[j]))
+        )
+
+        acc += (invw * term) ** 2
+
+    fluct[bid] = kBT * acc * (1.0 / (r0*r0))
+@cuda.jit
+def compute_error(fluct, fluct_MD, error):
+    i = cuda.grid(1)
+    if i < error.shape[0]:
+        error[i] = fluct[i] - fluct_MD[i]
+def NMA_GPU(N, bond_list, fluctuation_MD, T, traj4, mass_weights):
+
+    nbonds = bond_list.shape[0]
+
+    # ---- unpack bond list ----
+    bond_i = bond_list[:,0].astype(np.int32) - 1
+    bond_j = bond_list[:,1].astype(np.int32) - 1
+    bond_k = bond_list[:,2].astype(np.float64)
+    bond_r0 = bond_list[:,3].astype(np.float64)
+
+    coords = traj4.xyz[0].astype(np.float64)
+    mass = mass_weights.astype(np.float64)
+
+    # ---- device arrays ----
+    bond_i_d = cuda.to_device(bond_i)
+    bond_j_d = cuda.to_device(bond_j)
+    bond_k_d = cuda.to_device(bond_k)
+    bond_r0_d = cuda.to_device(bond_r0)
+
+    coords_d = cuda.to_device(coords)
+    mass_d = cuda.to_device(mass)
+
+    hessian_d = cuda.device_array((3*N, 3*N), dtype=np.float64)
+
+    # ---- build Hessian ----
+    threads = 128
+    blocks = (nbonds + threads - 1) // threads
+
+    build_hessian_atomic[blocks, threads](
+        bond_i_d, bond_j_d, bond_k_d, bond_r0_d,
+        coords_d, mass_d, hessian_d
+    )
+
+    # ---- eigen decomposition (CPU) ----
+    hessian = hessian_d.copy_to_host()
+    w, v = np.linalg.eigh(hessian)
+
+    mask = w > 1e-5
+    w = w[mask]
+    v = v[:, mask]
+
+    # ---- fluctuation ----
+    w_d = cuda.to_device(w)
+    v_d = cuda.to_device(v)
+    fluct_d = cuda.device_array(nbonds, dtype=np.float64)
+
+    compute_fluctuation[blocks, threads](
+        bond_i_d, bond_j_d, bond_r0_d,
+        coords_d, mass_d, w_d, v_d,
+        T, fluct_d
+    )
+
+    # ---- error ----
+    fluct_MD_d = cuda.to_device(fluctuation_MD.astype(np.float64))
+    error_d = cuda.device_array(nbonds, dtype=np.float64)
+
+    compute_error[blocks, threads](fluct_d, fluct_MD_d, error_d)
+
+    error = error_d.copy_to_host()
+
+    # ---- cleanup ----
+    del hessian, hessian_d, fluct_d
+    gc.collect()
+
+    return v, w, error

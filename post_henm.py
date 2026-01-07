@@ -65,7 +65,7 @@ traj5=md.load_lammpstrj(path+'/POST_PROCESSING/hENM_CG_trajectory.lammpstrj', to
 
 traj5=traj5.superpose(traj5, frame=0, atom_indices=None, ref_atom_indices=None, parallel=True)
 #traj5=traj5[::stride]
-traj5=traj5[::100000]
+traj5=traj5[::100]
 traj5.xyz[:,:,:]=traj5.xyz[:,:,:]*10      # coordinates in Angstroms
                         
 no_frames_CG_lmp=traj5.n_frames           # no. of frames in MD trajectory

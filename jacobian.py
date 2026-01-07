@@ -105,7 +105,7 @@ def gpu_deri_eign_vec_partial(v_real, w_real, bond_idx, i_atom, j_atom, k_mode, 
 
 @cuda.jit
 def jacobian_kernel_core(bond_list, positions, v_real, w_real, deri_H_per_bond,fluctuation_MD,
-                         mass_weights, error_old, T, jac_out):
+                         mass_weights, T, jac_out):
     """
     Each thread computes jac_out[m, n] as in your CPU version.
     bond_list: int32[:,] (M, >=4)  columns: atom1, atom2, ..., column 3 used for scaling
@@ -139,9 +139,7 @@ def jacobian_kernel_core(bond_list, positions, v_real, w_real, deri_H_per_bond,f
     disp0 = positions[i, 0] - positions[j, 0]
     disp1 = positions[i, 1] - positions[j, 1]
     disp2 = positions[i, 2] - positions[j, 2]
-
     DEL_error_i_j = 0.0
-    fluctuation_NMA = 0.0
     # loop over modes
     for k in range(modes):
         # derivative eigenvalue wrt bond n for mode k
@@ -149,8 +147,6 @@ def jacobian_kernel_core(bond_list, positions, v_real, w_real, deri_H_per_bond,f
 
         w_k_real = w_real[k]
         sqrt_wk = math.sqrt(abs(w_k_real))
-        if sqrt_wk == 0.0:
-            continue
 
         v_i0 = v_real[3 * i + 0, k]; v_i1 = v_real[3 * i + 1, k]; v_i2 = v_real[3 * i + 2, k]
         v_j0 = v_real[3 * j + 0, k]; v_j1 = v_real[3 * j + 1, k]; v_j2 = v_real[3 * j + 2, k]
@@ -172,10 +168,8 @@ def jacobian_kernel_core(bond_list, positions, v_real, w_real, deri_H_per_bond,f
         dproj_dv = (disp0 * dvterm0 + disp1 * dvterm1 + disp2 * dvterm2) / sqrt_wk
 
         denom_abs = abs(w_k_real)
-        if denom_abs == 0.0:
-            dproj_dw = 0.0
-        else:
-            dproj_dw = (-0.5) * (denom_abs ** (-1.5)) * delw_k_delP_r * proj
+
+        dproj_dw = (-0.5) * (denom_abs ** (-1.5)) * delw_k_delP_r * proj
 
         DEL_error_i_j += (proj / sqrt_wk) * (dproj_dw + (1/sqrt_wk)*dproj_dv)*(8.314462618 * 0.001 *T*((proj /((bond_list[m, 3])*sqrt_wk)) ** 2)- fluctuation_MD[m])
          
@@ -188,7 +182,7 @@ def jacobian_kernel_core(bond_list, positions, v_real, w_real, deri_H_per_bond,f
 
     jac_out[m, n] = deri_sq_error
 
-def get_jacobian(bond_list, N, v, w, traj4, mass_weights, fluctuation_MD, T, error_old, deri_H_per_bond):
+def get_jacobian(bond_list, N, v, w, traj4, mass_weights, fluctuation_MD, T, deri_H_per_bond):
     """
     GPU-backed replacement for get_jacobian.
     Returns jacobian as complex128 of shape (M, M) to match original API.
@@ -218,7 +212,6 @@ def get_jacobian(bond_list, N, v, w, traj4, mass_weights, fluctuation_MD, T, err
         raise ValueError("traj4.xyz[0] must have shape (N,3).")
 
     mass_weights = np.asarray(mass_weights, dtype=np.float64).reshape(-1)
-    error_old = np.asarray(error_old, dtype=np.float64).reshape(-1)
     bond_list_i32 = bond_list.astype(np.int32)
 
     # -- move to device
@@ -228,7 +221,6 @@ def get_jacobian(bond_list, N, v, w, traj4, mass_weights, fluctuation_MD, T, err
     w_dev = cuda.to_device(w_real)
     H_dev = cuda.to_device(deri_H_per_bond)
     mass_dev = cuda.to_device(mass_weights)
-    err_dev = cuda.to_device(error_old)
     fluctuation_MD_dev = cuda.to_device(fluctuation_MD)
     jac_dev = cuda.device_array((M, M), dtype=np.float64)
 
@@ -238,7 +230,7 @@ def get_jacobian(bond_list, N, v, w, traj4, mass_weights, fluctuation_MD, T, err
 
     # launch kernel
     jacobian_kernel_core[blockspergrid, threadsperblock](
-        bond_dev, pos_dev, v_dev, w_dev, H_dev, fluctuation_MD_dev, mass_dev, err_dev, T, jac_dev
+        bond_dev, pos_dev, v_dev, w_dev, H_dev, fluctuation_MD_dev, mass_dev,  T, jac_dev
     )
 
     # copy back

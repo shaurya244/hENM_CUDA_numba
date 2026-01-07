@@ -31,30 +31,44 @@ def force_constant_jacobian(bond_list,N,fluctuation_MD,traj4,T,mass_weights,max_
         H6 = derivative_hessian(bond_list, d, f, traj4, mass_weights)  # must be numeric 6x6
         deri_H_per_bond[idx] = xp.array(H6, dtype=xp.float64)
     while k < max_itr:
-        Jacobian = get_jacobian(bond_list, N, v_old, w_old, traj4, mass_weights, fluctuation_MD, T, error_old, deri_H_per_bond)
+        Jacobian = get_jacobian(bond_list, N, v_old, w_old, traj4, mass_weights, fluctuation_MD, T, deri_H_per_bond)
         print("jacobian calculated")
         pertub = xp.squeeze(solve(Jacobian, sq_error_old.reshape((len(bond_list), 1))))
-        beta =  0.1/xp.max(xp.abs(pertub/bond_list[:, 2]))
+        
+        den = xp.abs(pertub / bond_list[:,2])
+        den = xp.where(den < 1e-12, 1e-12, den)
+        beta = 50/ xp.max(den)
+        beta = xp.minimum(beta, 1.0)
         K_new = bond_list[:,2]  - beta * pertub
-        delta_w = eigenvalue_jacob_gpu(bond_list, N, traj4, mass_weights, v_old, deri_H_per_bond) @ ((K_new - bond_list[:, 2]).reshape((len(bond_list), 1)))
-        # w_new = w_old + xp.squeeze(delta_w)
-        # for i in range (v_old.shape[1]):
-        #     delta_v = eigenvector_jacobian_gpu(bond_list, v_old, w_old, deri_H_per_bond, i, N) @ ((K_new - bond_list[:, 2]).reshape((len(bond_list), 1)))
-        #     v_new[:,i] = v_old[:,i] + xp.squeeze(delta_v)
-        v_new, w_new,e= NMA(N, bond_list, fluctuation_MD, T, traj4, mass_weights)
         K_new = xp.asarray(K_new, dtype=xp.complex128)
         K_new = xp.asarray(xp.real(K_new), dtype=xp.float64)
-        K_new[:] = xp.where(K_new< 0, 0, K_new)
-        bond_list[:, 2] = K_new
-        print("updated K values real", K_new.dtype)
+        K_new[:] = xp.where(K_new < 0, 1e-6, K_new)
+        delta_w = eigenvalue_jacob_gpu(bond_list, N, traj4, mass_weights, v_old, deri_H_per_bond) @ ((K_new - bond_list[:, 2]).reshape((len(bond_list), 1)))
+        w_new = w_old + xp.squeeze(delta_w)
+        for i in range (v_old.shape[1]):
+            delta_v = eigenvector_jacobian_gpu(bond_list, v_old, w_old, deri_H_per_bond, i, N) @ ((K_new - bond_list[:, 2]).reshape((len(bond_list), 1)))
+            v_new[:,i] = v_old[:,i] + xp.squeeze(delta_v)
+        w_new = xp.asarray(w_new, dtype=xp.complex128)
+        w_new = xp.asarray(xp.real(w_new), dtype=xp.float64)        
+        v_new = xp.asarray(v_new, dtype=xp.complex128)
+        v_new = xp.asarray(xp.real(v_new), dtype=xp.float64)            
         v_old = v_new   
         w_old = w_new
         k = k + 1
-        error_old= NMA_error(bond_list, traj4, mass_weights, fluctuation_MD, T, N, v_old, w_old)
-        sq_error_old = error_old**2 
+        delK = K_new - bond_list[:, 2]
+        print("jacobian:", Jacobian)
+        del_error =  Jacobian @ delK
+        sq_error_non_nma = sq_error_old  - del_error
+        sq_error_non_nma = xp.asarray(sq_error_non_nma, dtype=xp.complex128)
+        sq_error_non_nma = xp.asarray(xp.real(sq_error_non_nma), dtype=xp.float64)
+        bond_list[:, 2] = K_new
+        sq_error_old = sq_error_non_nma
+        
+        print("sum_sq_error_old final:", xp.sum(sq_error_old)) 
         SUM_OF_SQUARE_ERROR.append(xp.sum(sq_error_old))
         itr.append(k)
 
+        
     plt.plot(itr, SUM_OF_SQUARE_ERROR, linestyle='solid')
     plt.xlabel('iteration')
     plt.ylabel('sum_sq_error')
