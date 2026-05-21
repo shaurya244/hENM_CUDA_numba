@@ -12,15 +12,20 @@ from derivative_hessian_updated import derivative_hessian
 from gpu_eigen_value_derivative import eigenvalue_jacob_gpu
 from gpu_eigen_vector_derivative import eigenvector_jacobian_gpu
 from func_error import NMA_fluctuations
+import cupy as cp
 def force_constant_jacobian(bond_list,N,fluctuation_MD,traj4,T,mass_weights,max_itr):
     K_new = xp.zeros((len(bond_list), 1), dtype=xp.float64)
-    v_old,w_old,error_old = NMA(N,bond_list,  fluctuation_MD, T, traj4, mass_weights)
+    K_new_test = xp.zeros((len(bond_list), 1), dtype=xp.float64)
+    v_old,w_old,error_old ,hessian= NMA(N,bond_list,  fluctuation_MD, T, traj4, mass_weights)
+    print("w_old:", w_old)
     k = 0
     w_new = xp.zeros((w_old.shape[0],1))
     v_new = xp.zeros(v_old.shape, dtype=xp.complex128)
     sq_error_old = error_old**2
     SUM_OF_SQUARE_ERROR = []
+    SUM_of_sq_error_nma = []
     SUM_OF_SQUARE_ERROR.append(xp.sum(sq_error_old))
+    SUM_of_sq_error_nma.append(xp.sum(error_old**2))
     itr = []
     itr.append(k)
     M = len(bond_list)
@@ -32,22 +37,25 @@ def force_constant_jacobian(bond_list,N,fluctuation_MD,traj4,T,mass_weights,max_
         deri_H_per_bond[idx] = xp.array(H6, dtype=xp.float64)
     while k < max_itr:
         Jacobian = get_jacobian(bond_list, N, v_old, w_old, traj4, mass_weights, fluctuation_MD, T, deri_H_per_bond)
-        print("jacobian calculated")
         pertub = xp.squeeze(solve(Jacobian, sq_error_old.reshape((len(bond_list), 1))))
-        
         den = xp.abs(pertub / bond_list[:,2])
         den = xp.where(den < 1e-12, 1e-12, den)
-        beta = 50/ xp.max(den)
-        beta = xp.minimum(beta, 1.0)
-        K_new = bond_list[:,2]  - beta * pertub
+        beta =100/ xp.max(den)
+        K_new = bond_list[:,2]  - 1*beta * pertub
         K_new = xp.asarray(K_new, dtype=xp.complex128)
         K_new = xp.asarray(xp.real(K_new), dtype=xp.float64)
-        K_new[:] = xp.where(K_new < 0, 1e-6, K_new)
+        K_new[:] = xp.where(K_new < 0, 1e-2, K_new)
         delta_w = eigenvalue_jacob_gpu(bond_list, N, traj4, mass_weights, v_old, deri_H_per_bond) @ ((K_new - bond_list[:, 2]).reshape((len(bond_list), 1)))
-        w_new = w_old + xp.squeeze(delta_w)
+        den_delta_w = xp.abs(delta_w / w_old)
+        den_delta_w = xp.where(den_delta_w < 1e-12, 1e-12, den_delta_w)
+        beta_w = 50 / xp.max(den_delta_w)
+        w_new = w_old + xp.squeeze(beta_w * delta_w)
         for i in range (v_old.shape[1]):
             delta_v = eigenvector_jacobian_gpu(bond_list, v_old, w_old, deri_H_per_bond, i, N) @ ((K_new - bond_list[:, 2]).reshape((len(bond_list), 1)))
-            v_new[:,i] = v_old[:,i] + xp.squeeze(delta_v)
+            den_delta_v = xp.abs(delta_v / v_old[:, i])
+            den_delta_v = xp.where(den_delta_v < 1e-12, 1e-12, den_delta_v)
+            beta_v = 100 / xp.max(den_delta_v)   
+            v_new[:,i] = v_old[:,i] + xp.squeeze(beta_v * delta_v)
         w_new = xp.asarray(w_new, dtype=xp.complex128)
         w_new = xp.asarray(xp.real(w_new), dtype=xp.float64)        
         v_new = xp.asarray(v_new, dtype=xp.complex128)
@@ -56,20 +64,23 @@ def force_constant_jacobian(bond_list,N,fluctuation_MD,traj4,T,mass_weights,max_
         w_old = w_new
         k = k + 1
         delK = K_new - bond_list[:, 2]
-        print("jacobian:", Jacobian)
         del_error =  Jacobian @ delK
-        sq_error_non_nma = sq_error_old  - del_error
+        sq_error_non_nma = sq_error_old - del_error
         sq_error_non_nma = xp.asarray(sq_error_non_nma, dtype=xp.complex128)
         sq_error_non_nma = xp.asarray(xp.real(sq_error_non_nma), dtype=xp.float64)
         bond_list[:, 2] = K_new
+        v_new_nma,w_new_nma,error_new_nma,hessian = NMA(N,bond_list,  fluctuation_MD, T, traj4, mass_weights)
+        # print("w_new_nma:", w_new_nma)        
         sq_error_old = sq_error_non_nma
-        
+        print("sum_sq_error_nma:",xp.sum(error_new_nma**2))
         print("sum_sq_error_old final:", xp.sum(sq_error_old)) 
         SUM_OF_SQUARE_ERROR.append(xp.sum(sq_error_old))
+        SUM_of_sq_error_nma.append(xp.sum(error_new_nma**2))
         itr.append(k)
 
-        
-    plt.plot(itr, SUM_OF_SQUARE_ERROR, linestyle='solid')
+    plt.figure()
+    # plt.plot(itr, SUM_OF_SQUARE_ERROR, linestyle='solid')
+    plt.plot(itr, SUM_of_sq_error_nma, linestyle='dashed')
     plt.xlabel('iteration')
     plt.ylabel('sum_sq_error')
     plt.title('Covergence of Force Constant')

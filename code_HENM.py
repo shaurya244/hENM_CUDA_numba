@@ -154,7 +154,7 @@ run=1
 if method =="iterative":
     bond_list=force_constants_nma(N,T,ALPHA,beta,max_itr,bond_list,fluctuation_MD,run,tolerance,path,flag_identical_bonds,flag_automate_ALPHA_beta_values,iterative_method,system,traj4, box_size,mass_weights)
 if method =="jacobian":
-    bond_list=force_constant_jacobian(bond_list,N,fluctuation_MD,traj4,T,mass_weights,1)
+    bond_list=force_constant_jacobian(bond_list,N,fluctuation_MD,traj4,T,mass_weights,10)
 if method =="NR_method_gpu":
     bond_list=force_constants_nma(N,T,ALPHA,beta,max_itr,bond_list,fluctuation_MD,run,tolerance,path,flag_identical_bonds,flag_automate_ALPHA_beta_values,iterative_method,system,traj4, box_size,mass_weights)
 np.savetxt(path+'/POST_PROCESSING/K_values_final.csv', bond_list, delimiter = ",")             

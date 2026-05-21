@@ -30,7 +30,7 @@ def NMA(N, bond_list, fluctuation_MD, T, traj4, mass_weights):
                 )
                 hessian[3 * i + k, 3 * j + l] = hij
                 hessian[3 * j + l, 3 * i + k] = hij
-    print("off diagonal")
+    # print("off diagonal")
 
     for i in range(N):
         for k in range(3):
@@ -41,11 +41,11 @@ def NMA(N, bond_list, fluctuation_MD, T, traj4, mass_weights):
                     if i != j
                 )
                 hessian[3 * i + k, 3 * i + l] = -value
-    print("diagonal")
+    # print("diagonal")
 
     # Use NumPy's eig (CuPy's linalg.eig has compatibility issues with all eigenvectors/eigenvalues on all platforms)
     w, v = LA.eig(hessian)
-    del hessian
+ 
 
     # Filter out small eigenvalues (translations + rotations)
     v_edit = []
@@ -88,7 +88,7 @@ def NMA(N, bond_list, fluctuation_MD, T, traj4, mass_weights):
     gc.collect()
     del fluctuation_NMA
 
-    return v, w, error
+    return v, w, error, hessian
 
 
 def force_constants(N, T, ALPHA, beta, max_itr, bond_list, fluctuation_MD, run, tolerance, path, flag_identical_bonds,

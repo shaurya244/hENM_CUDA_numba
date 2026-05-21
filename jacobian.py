@@ -7,7 +7,15 @@ from derivative_hessian_updated import derivative_hessian  # to calculate the pa
 # -----------------------
 # Device helper functions
 # -----------------------
+@cuda.jit(device=True)
+def matmul_kernel(A, B, C):
+    row, col = cuda.grid(2)
 
+    if row < C.shape[0] and col < C.shape[1]:
+        tmp = 0.0
+        for k in range(A.shape[1]):
+            tmp += A[row, k] * B[k, col]
+        C[row, col] = tmp
 @cuda.jit(device=True)
 def gpu_deri_eign_val(v_real, bond_idx, i_atom, j_atom, k_mode, deri_H_per_bond):
     """
@@ -42,7 +50,7 @@ def gpu_deri_eign_val(v_real, bond_idx, i_atom, j_atom, k_mode, deri_H_per_bond)
 
 
 @cuda.jit(device=True)
-def gpu_deri_eign_vec_partial(v_real, w_real, bond_idx, i_atom, j_atom, k_mode, modes, deri_H_per_bond):
+def gpu_deri_eign_vec_partial(v_real, w_real, bond_idx, i_atom, j_atom, k_mode, modes, delw_k_delP_r, deri_H_per_bond):
     """
     Computes only the 6 components of derivative eigenvector needed by your projection:
     returns (delv_i0, delv_i1, delv_i2, delv_j0, delv_j1, delv_j2)
@@ -68,7 +76,9 @@ def gpu_deri_eign_vec_partial(v_real, w_real, bond_idx, i_atom, j_atom, k_mode, 
         denom = w_real[k_mode] - w_real[r]
         if denom == 0.0:
             continue
-
+        a = 0.0
+        for m in range(v_real.shape[0]):
+            a += -delw_k_delP_r * v_real[m, r] * v_real[m, k_mode]
         # v_r_ij components (6)
         vr0 = v_real[3 * i_atom + 0, r]; vr1 = v_real[3 * i_atom + 1, r]; vr2 = v_real[3 * i_atom + 2, r]
         vr3 = v_real[3 * j_atom + 0, r]; vr4 = v_real[3 * j_atom + 1, r]; vr5 = v_real[3 * j_atom + 2, r]
@@ -76,16 +86,15 @@ def gpu_deri_eign_vec_partial(v_real, w_real, bond_idx, i_atom, j_atom, k_mode, 
         # v_k_ij components (6)
         vk0 = v_real[3 * i_atom + 0, k_mode]; vk1 = v_real[3 * i_atom + 1, k_mode]; vk2 = v_real[3 * i_atom + 2, k_mode]
         vk3 = v_real[3 * j_atom + 0, k_mode]; vk4 = v_real[3 * j_atom + 1, k_mode]; vk5 = v_real[3 * j_atom + 2, k_mode]
-
+        b = -delw_k_delP_r*(vr0*vk0 + vr1*vk1 + vr2*vk2 + vr3*vk3 + vr4*vk4 + vr5*vk5)
         # temp = H6 @ v_k_ij
-        t0 = H6[0,0]*vk0 + H6[0,1]*vk1 + H6[0,2]*vk2 + H6[0,3]*vk3 + H6[0,4]*vk4 + H6[0,5]*vk5
-        t1 = H6[1,0]*vk0 + H6[1,1]*vk1 + H6[1,2]*vk2 + H6[1,3]*vk3 + H6[1,4]*vk4 + H6[1,5]*vk5
-        t2 = H6[2,0]*vk0 + H6[2,1]*vk1 + H6[2,2]*vk2 + H6[2,3]*vk3 + H6[2,4]*vk4 + H6[2,5]*vk5
-        t3 = H6[3,0]*vk0 + H6[3,1]*vk1 + H6[3,2]*vk2 + H6[3,3]*vk3 + H6[3,4]*vk4 + H6[3,5]*vk5
-        t4 = H6[4,0]*vk0 + H6[4,1]*vk1 + H6[4,2]*vk2 + H6[4,3]*vk3 + H6[4,4]*vk4 + H6[4,5]*vk5
-        t5 = H6[5,0]*vk0 + H6[5,1]*vk1 + H6[5,2]*vk2 + H6[5,3]*vk3 + H6[5,4]*vk4 + H6[5,5]*vk5
-
-        dot = vr0*t0 + vr1*t1 + vr2*t2 + vr3*t3 + vr4*t4 + vr5*t5
+        t0 = (H6[0,0]-delw_k_delP_r)*vk0 + H6[0,1]*vk1 + H6[0,2]*vk2 + H6[0,3]*vk3 + H6[0,4]*vk4 + H6[0,5]*vk5
+        t1 = H6[1,0]*vk0 + (H6[1,1]-delw_k_delP_r)*vk1 + H6[1,2]*vk2 + H6[1,3]*vk3 + H6[1,4]*vk4 + H6[1,5]*vk5
+        t2 = H6[2,0]*vk0 + H6[2,1]*vk1 + (H6[2,2]-delw_k_delP_r)*vk2 + H6[2,3]*vk3 + H6[2,4]*vk4 + H6[2,5]*vk5
+        t3 = H6[3,0]*vk0 + H6[3,1]*vk1 + H6[3,2]*vk2 + (H6[3,3]-delw_k_delP_r)*vk3 + H6[3,4]*vk4 + H6[3,5]*vk5
+        t4 = H6[4,0]*vk0 + H6[4,1]*vk1 + H6[4,2]*vk2 + H6[4,3]*vk3 + (H6[4,4]-delw_k_delP_r)*vk4 + H6[4,5]*vk5
+        t5 = H6[5,0]*vk0 + H6[5,1]*vk1 + H6[5,2]*vk2 + H6[5,3]*vk3 + H6[5,4]*vk4 + (H6[5,5]-delw_k_delP_r)*vk5
+        dot = vr0*t0 + vr1*t1 + vr2*t2 + vr3*t3 + vr4*t4 + vr5*t5+a-b
         a_k = dot / denom
 
         if a_k != 0.0:
@@ -158,7 +167,7 @@ def jacobian_kernel_core(bond_list, positions, v_real, w_real, deri_H_per_bond,f
         proj = disp0 * vterm0 + disp1 * vterm1 + disp2 * vterm2
 
         dv_i0, dv_i1, dv_i2, dv_j0, dv_j1, dv_j2 = gpu_deri_eign_vec_partial(
-            v_real, w_real, n, d, f, k, modes, deri_H_per_bond
+            v_real, w_real, n, d, f, k, modes, delw_k_delP_r, deri_H_per_bond
         )
 
         dvterm0 = (dv_i0 / inv_mass_i) - (dv_j0 / inv_mass_j)
@@ -182,7 +191,7 @@ def jacobian_kernel_core(bond_list, positions, v_real, w_real, deri_H_per_bond,f
 
     jac_out[m, n] = deri_sq_error
 
-def get_jacobian(bond_list, N, v, w, traj4, mass_weights, fluctuation_MD, T, deri_H_per_bond):
+def get_jacobian(bond_list, N, v, w, traj4, mass_weights,  fluctuation_MD, T, deri_H_per_bond):
     """
     GPU-backed replacement for get_jacobian.
     Returns jacobian as complex128 of shape (M, M) to match original API.
@@ -221,6 +230,7 @@ def get_jacobian(bond_list, N, v, w, traj4, mass_weights, fluctuation_MD, T, der
     w_dev = cuda.to_device(w_real)
     H_dev = cuda.to_device(deri_H_per_bond)
     mass_dev = cuda.to_device(mass_weights)
+    
     fluctuation_MD_dev = cuda.to_device(fluctuation_MD)
     jac_dev = cuda.device_array((M, M), dtype=np.float64)
 
@@ -230,7 +240,7 @@ def get_jacobian(bond_list, N, v, w, traj4, mass_weights, fluctuation_MD, T, der
 
     # launch kernel
     jacobian_kernel_core[blockspergrid, threadsperblock](
-        bond_dev, pos_dev, v_dev, w_dev, H_dev, fluctuation_MD_dev, mass_dev,  T, jac_dev
+        bond_dev, pos_dev, v_dev, w_dev, H_dev, fluctuation_MD_dev, mass_dev, T, jac_dev
     )
 
     # copy back
