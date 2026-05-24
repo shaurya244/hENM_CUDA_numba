@@ -60,7 +60,7 @@ def deri_eign_vec_device(p, i, j, k, v, w, deri_H, n_modes, delw_k_delP_r):
             vr5*(deri_H[5,0]*vk0 + deri_H[5,1]*vk1 + deri_H[5,2]*vk2 + deri_H[5,3]*vk3 + deri_H[5,4]*vk4 + (deri_H[5,5]-delw_k_delP_r)*vk5)+a-b
         )
 
-        denom = w[r]
+        denom = w[k] - w[r]   # Fox-Kapoor eq. 5: denominator is (λ_k − λ_r)
         if denom != 0.0:
             acc += (num / denom) * v[p, r]
 

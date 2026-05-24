@@ -113,17 +113,18 @@ def gpu_deri_eign_vec_partial(v_real, w_real, bond_idx, i_atom, j_atom, k_mode, 
 # -----------------------
 
 @cuda.jit
-def jacobian_kernel_core(bond_list, positions, v_real, w_real, deri_H_per_bond,fluctuation_MD,
+def jacobian_kernel_core(bond_list, bond_dist, positions, v_real, w_real, deri_H_per_bond, fluctuation_MD,
                          mass_weights, T, jac_out):
     """
-    Each thread computes jac_out[m, n] as in your CPU version.
-    bond_list: int32[:,] (M, >=4)  columns: atom1, atom2, ..., column 3 used for scaling
+    Each thread computes jac_out[m, n] = d(sq_error_m)/d(K_n).
+    bond_list: int32[:,2]  columns: atom1(1-based), atom2(1-based)
+    bond_dist: float64[:,] column 3 of original bond_list (bond length r_ij)
     positions: float64[:,3] (N,3)
     v_real: float64[:, :] (ndof, modes) where ndof=3*N
     w_real: float64[:] (modes,)
     deri_H_per_bond: float64[:,6,6] (M,6,6)
     mass_weights: float64[:] (N,)
-    error_old: float64[:] (M,)
+    fluctuation_MD: float64[:] (M,)
     T: float scalar
     jac_out: float64[:, :] (M, M)   output
     """
@@ -180,24 +181,24 @@ def jacobian_kernel_core(bond_list, positions, v_real, w_real, deri_H_per_bond,f
 
         dproj_dw = (-0.5) * (denom_abs ** (-1.5)) * delw_k_delP_r * proj
 
-        DEL_error_i_j += (proj / sqrt_wk) * (dproj_dw + (1/sqrt_wk)*dproj_dv)*(8.314462618 * 0.001 *T*((proj /((bond_list[m, 3])*sqrt_wk)) ** 2)- fluctuation_MD[m])
-         
-    denom_b = bond_list[m, 3]
-   
+        DEL_error_i_j += (proj / sqrt_wk) * (dproj_dw + (1/sqrt_wk)*dproj_dv)
+
+    # bond distance for bond m (float, from separate array)
+    denom_b = bond_dist[m]
+
     scale = ((1.0 / denom_b) ** 2)
 
-    kB = 8.314462618 * 0.001  
-    deri_sq_error = (4.0 * kB * T ) * scale * DEL_error_i_j 
+    kB = 8.314462618 * 0.001
+    # d(fluct_NMA_m)/d(K_n) — caller multiplies by 2*diag(error) to get d(sq_error)/d(K)
+    deri_fluct = (2.0 * kB * T) * scale * DEL_error_i_j
 
-    jac_out[m, n] = deri_sq_error
+    jac_out[m, n] = deri_fluct
 
 def get_jacobian(bond_list, N, v, w, traj4, mass_weights,  fluctuation_MD, T, deri_H_per_bond):
     """
-    GPU-backed replacement for get_jacobian.
-    Returns jacobian as complex128 of shape (M, M) to match original API.
-    Requirements:
-      - derivative_hessian(bond_list, i, j, traj4, mass_weights) must be available and return numeric 6x6 arrays.
-      - numba.cuda and a CUDA-capable GPU.
+    GPU-backed Jacobian: returns J where J[m,n] = d(fluct_NMA_m)/d(K_n).
+    Caller should form J_sq = 2 * diag(error) @ J and then solve(J_sq, sq_error).
+    Returns J as float64 (M, M).
     """
     # -- basic conversions and checks
     bond_list = np.asarray(bond_list)
@@ -221,16 +222,20 @@ def get_jacobian(bond_list, N, v, w, traj4, mass_weights,  fluctuation_MD, T, de
         raise ValueError("traj4.xyz[0] must have shape (N,3).")
 
     mass_weights = np.asarray(mass_weights, dtype=np.float64).reshape(-1)
-    bond_list_i32 = bond_list.astype(np.int32)
+
+    # Separate atom indices (int32) from bond distances (float64) — Bug 7 fix
+    bond_list_i32 = bond_list[:, :2].astype(np.int32)       # only atom index columns
+    bond_dist_f64 = bond_list[:, 3].astype(np.float64)      # bond distances stay float
 
     # -- move to device
     bond_dev = cuda.to_device(bond_list_i32)
+    bond_dist_dev = cuda.to_device(bond_dist_f64)
     pos_dev = cuda.to_device(positions)
     v_dev = cuda.to_device(v_real.astype(np.float64))
     w_dev = cuda.to_device(w_real)
     H_dev = cuda.to_device(deri_H_per_bond)
     mass_dev = cuda.to_device(mass_weights)
-    
+
     fluctuation_MD_dev = cuda.to_device(fluctuation_MD)
     jac_dev = cuda.device_array((M, M), dtype=np.float64)
 
@@ -240,12 +245,12 @@ def get_jacobian(bond_list, N, v, w, traj4, mass_weights,  fluctuation_MD, T, de
 
     # launch kernel
     jacobian_kernel_core[blockspergrid, threadsperblock](
-        bond_dev, pos_dev, v_dev, w_dev, H_dev, fluctuation_MD_dev, mass_dev, T, jac_dev
+        bond_dev, bond_dist_dev, pos_dev, v_dev, w_dev, H_dev, fluctuation_MD_dev, mass_dev, T, jac_dev
     )
 
     # copy back
     jac_real = jac_dev.copy_to_host()
-    # return complex128 to match original API
+    # J[m,n] = d(fluct_NMA_m)/d(K_n) — caller multiplies by 2*error for full Jacobian of sq_error
     jac_complex = np.zeros((M, M), dtype=np.complex128)
     jac_complex.real = jac_real
     return jac_complex

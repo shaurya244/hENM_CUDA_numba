@@ -12,7 +12,7 @@ from derivative_hessian_updated import derivative_hessian
 from gpu_eigen_value_derivative import eigenvalue_jacob_gpu
 from gpu_eigen_vector_derivative import eigenvector_jacobian_gpu
 from func_error import NMA_fluctuations
-import cupy as cp
+
 def force_constant_jacobian(bond_list,N,fluctuation_MD,traj4,T,mass_weights,max_itr):
     K_new = xp.zeros((len(bond_list), 1), dtype=xp.float64)
     K_new_test = xp.zeros((len(bond_list), 1), dtype=xp.float64)
@@ -21,10 +21,11 @@ def force_constant_jacobian(bond_list,N,fluctuation_MD,traj4,T,mass_weights,max_
     k = 0
     w_new = xp.zeros((w_old.shape[0],1))
     v_new = xp.zeros(v_old.shape, dtype=xp.complex128)
-    sq_error_old = error_old**2
+    # sq_error_old holds the signed error (fluct_NMA - fluct_MD), NOT squared
+    sq_error_old = error_old
     SUM_OF_SQUARE_ERROR = []
     SUM_of_sq_error_nma = []
-    SUM_OF_SQUARE_ERROR.append(xp.sum(sq_error_old))
+    SUM_OF_SQUARE_ERROR.append(xp.sum(error_old**2))
     SUM_of_sq_error_nma.append(xp.sum(error_old**2))
     itr = []
     itr.append(k)
@@ -36,45 +37,37 @@ def force_constant_jacobian(bond_list,N,fluctuation_MD,traj4,T,mass_weights,max_
         H6 = derivative_hessian(bond_list, d, f, traj4, mass_weights)  # must be numeric 6x6
         deri_H_per_bond[idx] = xp.array(H6, dtype=xp.float64)
     while k < max_itr:
-        Jacobian = get_jacobian(bond_list, N, v_old, w_old, traj4, mass_weights, fluctuation_MD, T, deri_H_per_bond)
-        pertub = xp.squeeze(solve(Jacobian, sq_error_old.reshape((len(bond_list), 1))))
-        den = xp.abs(pertub / bond_list[:,2])
-        den = xp.where(den < 1e-12, 1e-12, den)
-        beta =100/ xp.max(den)
-        K_new = bond_list[:,2]  - 1*beta * pertub
+        # get_jacobian returns J where J[m,n] = d(fluct_NMA_m)/d(K_n)
+        J_fluct = get_jacobian(bond_list, N, v_old, w_old, traj4, mass_weights, fluctuation_MD, T, deri_H_per_bond)
+        J_fluct = xp.real(xp.asarray(J_fluct))   # (M, M) real
+
+        # Bug 2 fix: form d(sq_error_m)/d(K_n) = 2 * error_m * d(fluct_NMA_m)/d(K_n)
+        # sq_error_old is the signed error vector (fluct_NMA - fluct_MD)
+        Jacobian = 2.0 * xp.diag(sq_error_old) @ J_fluct   # shape (M, M)
+
+        # Regularise to avoid singular matrix when some errors are near zero
+        M_bonds = len(bond_list)
+        eps = 1e-8 * xp.max(xp.abs(xp.diag(Jacobian))) if xp.any(xp.diag(Jacobian) != 0) else 1e-8
+        Jacobian_reg = Jacobian + eps * xp.eye(M_bonds)
+        pertub = xp.squeeze(solve(Jacobian_reg, (sq_error_old**2).reshape((M_bonds, 1))))
+
+        # Bug 5 fix: start with beta=1 (pure Newton); clamp to avoid huge steps
+        beta = 1.0
+        K_new = bond_list[:,2] - beta * pertub
         K_new = xp.asarray(K_new, dtype=xp.complex128)
         K_new = xp.asarray(xp.real(K_new), dtype=xp.float64)
         K_new[:] = xp.where(K_new < 0, 1e-2, K_new)
-        delta_w = eigenvalue_jacob_gpu(bond_list, N, traj4, mass_weights, v_old, deri_H_per_bond) @ ((K_new - bond_list[:, 2]).reshape((len(bond_list), 1)))
-        den_delta_w = xp.abs(delta_w / w_old)
-        den_delta_w = xp.where(den_delta_w < 1e-12, 1e-12, den_delta_w)
-        beta_w = 50 / xp.max(den_delta_w)
-        w_new = w_old + xp.squeeze(beta_w * delta_w)
-        for i in range (v_old.shape[1]):
-            delta_v = eigenvector_jacobian_gpu(bond_list, v_old, w_old, deri_H_per_bond, i, N) @ ((K_new - bond_list[:, 2]).reshape((len(bond_list), 1)))
-            den_delta_v = xp.abs(delta_v / v_old[:, i])
-            den_delta_v = xp.where(den_delta_v < 1e-12, 1e-12, den_delta_v)
-            beta_v = 100 / xp.max(den_delta_v)   
-            v_new[:,i] = v_old[:,i] + xp.squeeze(beta_v * delta_v)
-        w_new = xp.asarray(w_new, dtype=xp.complex128)
-        w_new = xp.asarray(xp.real(w_new), dtype=xp.float64)        
-        v_new = xp.asarray(v_new, dtype=xp.complex128)
-        v_new = xp.asarray(xp.real(v_new), dtype=xp.float64)            
-        v_old = v_new   
-        w_old = w_new
-        k = k + 1
-        delK = K_new - bond_list[:, 2]
-        del_error =  Jacobian @ delK
-        sq_error_non_nma = sq_error_old - del_error
-        sq_error_non_nma = xp.asarray(sq_error_non_nma, dtype=xp.complex128)
-        sq_error_non_nma = xp.asarray(xp.real(sq_error_non_nma), dtype=xp.float64)
         bond_list[:, 2] = K_new
-        v_new_nma,w_new_nma,error_new_nma,hessian = NMA(N,bond_list,  fluctuation_MD, T, traj4, mass_weights)
-        # print("w_new_nma:", w_new_nma)        
-        sq_error_old = sq_error_non_nma
-        print("sum_sq_error_nma:",xp.sum(error_new_nma**2))
-        print("sum_sq_error_old final:", xp.sum(sq_error_old)) 
-        SUM_OF_SQUARE_ERROR.append(xp.sum(sq_error_old))
+        k = k + 1
+
+        # Bug 4 & 6 fix: recompute exact NMA and use those eigenpairs/error for next iteration
+        v_new_nma, w_new_nma, error_new_nma, hessian = NMA(N, bond_list, fluctuation_MD, T, traj4, mass_weights)
+        v_old = v_new_nma
+        w_old = w_new_nma
+        sq_error_old = error_new_nma   # true error, not the linearised estimate
+
+        print("sum_sq_error_nma:", xp.sum(error_new_nma**2))
+        SUM_OF_SQUARE_ERROR.append(xp.sum(sq_error_old**2))
         SUM_of_sq_error_nma.append(xp.sum(error_new_nma**2))
         itr.append(k)
 
